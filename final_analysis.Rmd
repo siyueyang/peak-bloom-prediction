@@ -1,0 +1,759 @@
+---
+title: "Cherry Blossom Prediction"
+author: "Siyue Yang, Miaoshiqi Liu"
+date: "02/18/2022"
+output:
+  html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE,
+                      fig.align = 'center',
+                      out.width = '80%')
+```
+
+
+# Elemenatry data anlaysis 
+
+```{r}
+library(tidyverse)
+library(rnoaa)     # Weather data
+library(imputeTS)  # Imputation on the temperature
+library(naniar)    # Visulize missing data 
+library(cowplot) 
+library(lubridate)
+library(mgcv)      # Spline fitting 
+library(randomForest) 
+library(e1071)     # SVM
+library(ggsci)     # Color
+library(corrplot)  # Correlation plot
+library(ssr)       # Semi-supervised regression
+
+source("helper_functions.R")
+```
+
+## Blossom data
+
+```{r}
+# Blossom data
+cherry <- read.csv("data/washingtondc.csv") %>% 
+  bind_rows(read.csv("data/liestal.csv")) %>% 
+  bind_rows(read.csv("data/kyoto.csv")) 
+
+# Get from the website
+# https://www.nps.gov/subjects/cherryblossom/bloom-watch.htm
+cherry_vc <- c("03/31/2004", "04/09/2005", "03/30/2006", "04/01/2007", "03/26/2008", "04/01/2009", "03/31/2010", "03/29/2011", "03/20/2012", "04/09/2013", "04/10/2014", "04/10/2015", "03/25/2016", "03/25/2017", "04/05/2018", "04/01/2019", "03/20/2020", "03/28/2021")
+
+cherry_vc <- data.frame(bloom_date = cherry_vc) %>%
+  mutate(bloom_date = as.POSIXct(bloom_date, format = '%m/%d/%Y')) %>%
+  mutate(year = as.integer(format(bloom_date, "%Y"))) %>%
+  mutate(bloom_doy = yday(bloom_date)) %>%
+  mutate(location = "vancouver") %>%
+  mutate(bloom_date = as.character(bloom_date)) %>%
+  select(location, year, bloom_date, bloom_doy)
+
+cherry <- cherry %>% select(location, year, bloom_date, bloom_doy) %>%
+  bind_rows(cherry_vc)
+```
+
+```{r, fig.cap="Time series of peak bloom of cherry trees since 1950 at four different sites."}
+cherry %>% 
+  filter(year >= 1950) %>%
+  ggplot(aes(x = year, y = bloom_doy)) +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  scale_x_continuous(breaks = seq(1880, 2020, by = 20)) +
+  facet_grid(cols = vars(str_to_title(location))) +
+  labs(x = "Year", y = "Peak bloom (days since Jan 1st)")
+```
+```{r, fig.cap="Distribution of peak bloom days across the four sites."}
+p1 <- cherry %>%
+  ggplot(aes(x = bloom_doy, fill = location), alpha = 0.7) +
+  geom_bar() + labs(x = "Peak bloom (days since Jan 1st)") + 
+  scale_fill_npg() + theme_bw() +
+  labs(x = "Peak bloom (days since Jan 1st)", y = "Frequency")
+
+p2 <- cherry %>%
+  ggplot() +
+  geom_density(aes(x = bloom_doy, fill = location), alpha = 0.7) +
+  scale_fill_npg() +
+  theme_bw() +
+  labs(x = "Peak bloom (days since Jan 1st)", y = "Density")
+
+ggpubr::ggarrange(p1, p2, common.legend = TRUE)
+```
+
+## Weather data
+
+1. Impute the missing temperature data 
+
+```{r}
+# Imputation plots
+# Get weather data. 
+dailyweather <- get_ghcnd("JA000047759")
+
+# Impute. 
+dailyweather <- imp_temperature(dat = dailyweather, c("tmax", "tmin"))
+
+dailyweather %>%
+  filter(year >= "1994-12-01" & year <= "1995-12-01") %>%
+  ggplot(aes(date, tmin_imp, color = tmin_na)) +
+  geom_point() + theme_bw() +
+  labs(x = "Date", y = "Temperature") + 
+  scale_color_discrete(name = "", labels = c("Nonmissing", "Imputed"))
+```
+
+2. Get the weather data from RNOAA
+
+```{r}
+# Weather data
+cherry.weathers <- 
+  tibble(location = "washingtondc", get_seasons.temperature("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_seasons.temperature("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_seasons.temperature("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_seasons.temperature("CA001108395")))
+```
+
+```{r}
+model_data <- cherry.weathers %>% 
+  merge(cherry, by = c("year", "location"), all.x = TRUE, all.y = TRUE) %>%
+  filter(year >= 1950)
+```
+
+3. Correlation plots
+
+```{r}
+# Correlation plots
+par(mfrow=c(2,2))
+
+# Japan
+corr_data_jp <- model_data %>% 
+  filter(location == "kyoto") %>%
+  select(where(is.numeric)) %>%
+  drop_na()
+
+colnames(corr_data_jp) <- c("Year", "AGDD", "FGDOY", "LGDOY", 
+                         "AFDD", "FFDOY", "LFDOY",
+                         "Tmax(W)", "Tmax(S)", "Tmin(W)", "Tmin(S)", 
+                         "PRCP(W)", "PRCP(S)", "Bloom days")
+corr_data_jp <- cor(corr_data_jp)
+p1 <- corrplot(corr_data_jp, tl.col = 'black')
+
+# Li
+corr_data_li <- model_data %>% 
+  filter(location == "liestal") %>%
+  select(where(is.numeric)) %>%
+  drop_na()
+
+colnames(corr_data_li) <- c("Year", "AGDD", "FGDOY", "LGDOY", 
+                         "AFDD", "FFDOY", "LFDOY",
+                         "Tmax(W)", "Tmax(S)", "Tmin(W)", "Tmin(S)", 
+                         "PRCP(W)", "PRCP(S)", "Bloom days")
+corr_data_li <- cor(corr_data_li)
+p2 <- corrplot(corr_data_li, tl.col = 'black')
+
+# dc
+corr_data_dc <- model_data %>% 
+  filter(location == "washingtondc") %>%
+  select(where(is.numeric)) %>%
+  drop_na()
+
+colnames(corr_data_dc) <- c("Year", "AGDD", "FGDOY", "LGDOY", 
+                         "AFDD", "FFDOY", "LFDOY",
+                         "Tmax(W)", "Tmax(S)", "Tmin(W)", "Tmin(S)", 
+                         "PRCP(W)", "PRCP(S)", "Bloom days")
+corr_data_dc <- cor(corr_data_dc)
+p3 <- corrplot(corr_data_dc, tl.col = 'black')
+
+# vanc
+corr_data_vc <- model_data %>% 
+  filter(location == "vancouver") %>%
+  select(where(is.numeric)) %>%
+  drop_na()
+
+colnames(corr_data_vc) <- c("Year", "AGDD", "FGDOY", "LGDOY", 
+                         "AFDD", "FFDOY", "LFDOY",
+                         "Tmax(W)", "Tmax(S)", "Tmin(W)", "Tmin(S)", 
+                         "PRCP(W)", "PRCP(S)", "Bloom days")
+corr_data_vc <- cor(corr_data_vc)
+p4 <- corrplot(corr_data_vc, tl.col = 'black')
+```
+
+Additional plots for weather 
+
+```{r}
+# 1. Montly average temperature
+dailyweather <- 
+  tibble(location = "washingtondc", get_ghcnd("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_ghcnd("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_ghcnd("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_ghcnd("CA001108395")))
+
+dailyweather <- imp_temperature(dat = dailyweather, c("tmax", "tmin"))
+
+
+month_tmax <- dailyweather %>% 
+  group_by(month_name, location, year) %>%
+  summarize(tmax_avg = mean(tmax_imp),
+            tmin_avg = mean(tmin_imp),
+            prcp_sum = sum(prcp, na.rm = TRUE),
+            prcp_avg = mean(prcp, na.rm = TRUE)) 
+
+a <- ggplot(month_tmax, aes(year, tmax_avg, color = location)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "top") +
+  ylim(c(-10, 30)) +
+  scale_color_npg() +
+  theme_bw() +
+  labs(title = "Monthly mean maximum temperature", 
+       subtitle = "January 1950 - Feburary 2022", y = "Degrees Celsius") +
+  facet_wrap(~ month_name) +
+  NULL
+
+b <- ggplot(month_tmax, aes(year, tmin_avg, color = location)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "top") +
+  ylim(c(-10, 30)) +
+  scale_color_npg() +
+  theme_bw() +
+  labs(title = "Monthly mean minimum temperature", 
+       subtitle = "January 1950 - Feburary 2022", y = "Degrees Celsius") +
+  facet_wrap(~ month_name) +
+  NULL
+
+ggpubr::ggarrange(a, b, common.legend = TRUE)
+```
+
+```{r}
+annual_tamx <- month_tmax %>% 
+  group_by(year, location) %>%
+  summarise(tmax_avg = mean(tmax_avg), 
+            tmin_avg = mean(tmin_avg))
+
+a <- annual_tamx %>%
+  ggplot(aes(year, tmax_avg)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = "loess") +
+    theme(axis.title.x = element_blank(),
+          legend.position = "none") +
+    labs(title = "Annual mean maximum temperature", subtitle = ": 1980-2021", y = "Degrees Celsius") 
+ 
+b <- annual_tamx %>%
+  ggplot(aes(year, tmin_avg)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = "loess") +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = "none") +
+    labs(title = "Annual mean minimum temperature", subtitle = ": 1980-2021", y = "Degrees Celsius")  
+
+plot_grid(a, b, nrow = 1, rel_widths = c(1, 1))
+```
+
+
+# Model
+
+```{r}
+# See how many data are available for training 
+model_data %>%
+  group_by(location) %>%
+  summarise(n = n())
+```
+
+## Kyoto
+
+```{r}
+model_data_jp <- model_data %>% 
+  filter(location == "kyoto") %>% drop_na()
+```
+
+```{r}
+mod_spline1 <- gam(bloom_doy ~ s(afdd) + s(tmax_avg_Winter) + s(tmax_avg_Spring) + 
+                     s(prcp_avg_Winter) + s(tmin_avg_Spring) + s(prcp_avg_Spring), data = model_data_jp)
+
+layout(matrix(1:6, nrow = 3))
+plot(mod_spline1, shade = TRUE)
+summary(mod_spline1)
+```
+
+```{r}
+# Model 3 has the highest r.sq
+mod_spline2 <- gam(bloom_doy ~ s(year, afdd)  + s(tmax_avg_Winter) +                      s(tmin_avg_Spring) + s(tmax_avg_Spring), data = model_data_jp)
+
+mod_spline3 <- gam(bloom_doy ~ s(afdd, prcp_avg_Spring) + s(tmax_avg_Winter) + 
+                     s(tmin_avg_Spring, tmax_avg_Spring), data = model_data_jp)
+
+summary(mod_spline2)$r.sq
+summary(mod_spline3)$r.sq
+
+layout(matrix(1:4, nrow = 1))
+plot(mod_spline2, shade = TRUE)
+summary(mod_spline2)
+```
+
+```{r, eval = F}
+gam.check(mod_spline2)
+```
+
+# Prediction
+
+```{r}
+train_data <- model_data_jp[1:60, ]
+test_data <- model_data_jp[61:70, ]
+
+# mod_spline1 <- gam(bloom_doy ~ s(afdd) + s(tmax_avg_Winter) + s(tmax_avg_Spring) +            s(prcp_avg_Winter) + s(tmin_avg_Spring) + s(prcp_avg_Spring), data = train_data)
+# unlist(cal_pred(mod_spline1, train_data, test_data))[-c(1:70)]
+# 
+# mod_spline2 <- gam(bloom_doy ~ s(year)  + s(tmax_avg_Winter) + 
+#                      s(tmin_avg_Spring) + s(tmax_avg_Spring), data = train_data)
+# unlist(cal_pred(mod_spline2, train_data, test_data))[-c(1:70)]
+# 
+# mod_spline3 <- gam(bloom_doy ~ s(prcp_avg_Spring) + s(tmax_avg_Winter) + 
+#                      s(tmin_avg_Spring) + s(tmax_avg_Spring), data = train_data)
+# unlist(cal_pred(mod_spline3, train_data, test_data))[-c(1:70)]
+```
+
+```{r}
+set.seed(1234)
+# Spline 
+mod_spline_jp <- gam(bloom_doy ~  s(tmax_avg_Winter) + s(tmax_avg_Spring) + 
+                     s(prcp_avg_Winter) + s(prcp_avg_Spring), data = train_data)
+summary(mod_spline_jp)
+layout(matrix(1:4, nrow = 2))
+plot(mod_spline_jp, shade = TRUE)
+
+unlist(cal_pred(mod_spline_jp, train_data, test_data))[-c(1:70)]
+
+
+# random forest
+rf_jp <- randomForest(bloom_doy ~  afdd + tmax_avg_Winter + 
+                     tmax_avg_Spring + tmin_avg_Spring + 
+                     prcp_avg_Spring, data = train_data, 
+                   mtry = 4/3, importance = TRUE, ntrees = 500)
+unlist(cal_pred(rf_jp, train_data, test_data))[-c(1:70)]
+
+
+
+# svm
+svm_jp <- svm(bloom_doy ~ afdd + tmax_avg_Winter + 
+                tmax_avg_Spring + tmin_avg_Spring + 
+                prcp_avg_Spring, data = train_data)
+unlist(cal_pred(svm_jp, train_data, test_data))[-c(1:70)]
+```
+
+```{r}
+# Local linear
+Three_Cities_kernel_fun(loc = "kyoto", model_data_jp, bw = 0.1)
+```
+
+
+
+# liestal
+
+```{r}
+model_data_li <- model_data %>% 
+  filter(location == "liestal") %>% drop_na()
+
+train_data <- model_data_li[1:55, ]
+test_data <- model_data_li[56:66, ]
+
+# Spline
+mod_spline_vc <- gam(bloom_doy ~ s(tmax_avg_Winter) + s(tmax_avg_Spring) + 
+                     s(prcp_avg_Winter) + s(prcp_avg_Spring), data = train_data)
+summary(mod_spline_vc)
+unlist(cal_pred(mod_spline_vc, train_data, test_data))[-c(1:66)]
+
+
+# random forest
+rf_vc <- randomForest(bloom_doy ~  tmax_avg_Winter + 
+                     tmax_avg_Spring + prcp_avg_Winter + 
+                     prcp_avg_Spring, data = train_data, 
+                   mtry = 4/3, importance = TRUE, ntrees = 500)
+unlist(cal_pred(rf_vc, train_data, test_data))[-c(1:66)]
+
+# svm
+svm_vc <- svm(bloom_doy ~ tmax_avg_Winter + 
+                     tmax_avg_Spring + prcp_avg_Winter + 
+                     prcp_avg_Spring, data = train_data)
+unlist(cal_pred(svm_vc, train_data, test_data))[-c(1:66)]
+```
+
+```{r}
+# Local linear
+Three_Cities_kernel_fun(loc = "liestal", model_data_li, bw = 0.1)
+```
+
+
+# Washington
+
+```{r}
+model_data_dc <- model_data %>% 
+  filter(location == "washingtondc") %>% drop_na()
+
+train_data <- model_data_dc[1:60, ]
+test_data <- model_data_dc[61:70, ]
+
+# Spline
+mod_spline_dc <- gam(bloom_doy ~ s(year) + s(tmax_avg_Winter) + s(tmax_avg_Spring) + s(tmin_avg_Winter) , data = train_data)
+summary(mod_spline_dc)
+unlist(cal_pred(mod_spline_dc, train_data, test_data))[-c(1:70)]
+
+
+
+# random forest
+rf_dc <- randomForest(bloom_doy ~  tmax_avg_Winter + 
+                     tmax_avg_Spring + prcp_avg_Winter + 
+                     prcp_avg_Spring, data = train_data, 
+                   mtry = 4/3, importance = TRUE, ntrees = 500)
+unlist(cal_pred(rf_dc, train_data, test_data))[-c(1:70)]
+
+# svm
+svm_dc <- svm(bloom_doy ~ tmax_avg_Winter + 
+                     tmax_avg_Spring + prcp_avg_Winter + 
+                     prcp_avg_Spring, data = train_data)
+unlist(cal_pred(svm_dc, train_data, test_data))[-c(1:70)]
+```
+
+```{r}
+# Local linear
+Three_Cities_kernel_fun(loc = "washingtondc", model_data_dc, bw = 0.1)
+```
+
+# Vancouver
+
+```{r}
+date_van <- c("03/31/2004", "04/09/2005", "03/30/2006", "04/01/2007", "03/26/2008", "04/01/2009", "03/31/2010", "03/29/2011", "03/20/2012", "04/09/2013", "04/10/2014", "04/10/2015", "03/25/2016", "03/25/2017", "04/05/2018", "04/01/2019", "03/20/2020", "03/28/2021")
+
+date_van <- data.frame(date = date_van) %>%
+  mutate(date = as.POSIXct(date, format = '%m/%d/%Y')) %>%
+  mutate(year = as.integer(format(date, "%Y"))) %>%
+  mutate(bloom_doy = yday(date)) %>%
+  mutate(location = "vancouver")
+```
+
+```{r}
+model_data_vc <- model_data %>% 
+  filter(location == "vancouver") %>%
+  select(-c(bloom_date, bloom_doy)) %>%
+  drop_na()
+
+model_data_vc <- model_data_vc %>%
+  merge(date_van, by = "year", all.x = TRUE)
+```
+
+(Semi-supervised learning)[https://cran.r-project.org/web/packages/ssr/vignettes/ssr-package-vignette.html]
+
+```{r}
+
+train_data <- model_data_vc[1:40, ] 
+train_data <- train_data %>% 
+  select(bloom_doy, tmax_avg_Spring, tmin_avg_Spring)
+
+test_data <- model_data_vc[41:45, ] 
+test_data <- test_data %>%
+   select(bloom_doy, tmax_avg_Spring, tmin_avg_Spring)
+
+label_index <- which(is.na(train_data$bloom_doy) == 1)
+L <- train_data[-label_index, ]  # This is the labeled dataset.
+U <- train_data[label_index, -1] # Remove the labels since this is the unlabeled dataset.
+
+# Fit the model.
+regressors <- list(linearRegression=lm, knn=caret::knnreg, svm=e1071::svm)
+mod_ssl <- ssr("bloom_doy ~ .", L, U, regressors = regressors, testdata = test_data)
+regressors <- list("lm", "rvmLinear")
+plot(mod_ssl, metric = "mae", ptype = 2)
+```
+
+
+```{r}
+y_hat_test <- predict(mod_ssl, newdata = test_data)
+test_pred <- round(y_hat_test)
+test_pred
+test_mae <- mean(abs(test_data$bloom_doy - test_pred))
+test_mae
+```
+
+```{r}
+# Spline
+# mod_spline_vc <- gam(bloom_doy ~ s(tmax_avg_Spring) , data = L)
+# nonp <- round(predict(mod_spline_vc, newdata = test_data))
+# mean(abs(test_data$bloom_doy - nonp))
+# 
+# # random forest
+# rf_vc <- randomForest(bloom_doy ~ tmax_avg_Spring, data = L, 
+#                    mtry = 4/3, importance = TRUE, ntrees = 500)
+# nonp <- round(predict(rf_vc, newdata = test_data))
+# mean(abs(test_data$bloom_doy - nonp))
+# 
+# # svm
+# svm_vc <- svm(bloom_doy ~ tmax_avg_Spring, data = L)
+# nonp <- round(predict(svm_vc, newdata = test_data))
+# mean(abs(test_data$bloom_doy - nonp))
+```
+
+
+# Forecast
+
+## Japan
+
+
+```{r}
+source("helper_functions.R")
+# dailyweather <- get_ghcnd(station_id = "JA000047759", 
+#                           date_range = c("1950-01-01",  "2022-02-28"))
+# dailyweather <- imp_temperature(dailyweather, c("tmax", "tmin"))
+# forecast_jp <- forecast_weather(dailyweather)
+
+forecast_jp <- forecast_weather_new(model_data_jp)
+```
+
+```{r}
+mod_spline_jp <- gam(bloom_doy ~ s(tmax_avg_Spring), data = model_data_jp)
+
+# rf <- randomForest(bloom_doy ~  afdd + tmax_avg_Winter + 
+#                      tmax_avg_Spring + tmin_avg_Spring + 
+#                      prcp_avg_Spring, data = model_data_jp, 
+#                    mtry = 4/3, importance = TRUE, ntrees = 500)
+# svmfit <- svm(bloom_doy ~ afdd + tmax_avg_Winter + 
+#                 tmax_avg_Spring + tmin_avg_Spring + 
+#                 prcp_avg_Spring, data = model_data_jp)
+
+jp_pred <- round(predict(mod_spline_jp, newdata = forecast_jp))
+
+# round(predict(rf, newdata = forecast_jp))
+# round(predict(svmfit, newdata = forecast_jp))
+
+
+```
+
+## Li
+
+```{r}
+# dailyweather <- get_ghcnd(station_id = "GME00127786", 
+#                           date_range = c("1950-01-01",  "2022-02-28"))
+# dailyweather <- imp_temperature(dailyweather, c("tmax", "tmin"))
+# forecast_li <- forecast_weather(dailyweather)
+forecast_li <- forecast_weather_new(model_data_li)
+```
+
+```{r}
+mod_spline_li <- gam(bloom_doy ~ s(tmax_avg_Spring), data = model_data_li)
+# 
+# rf <- randomForest(bloom_doy ~  afdd + tmax_avg_Winter + 
+#                      tmax_avg_Spring + tmin_avg_Spring + 
+#                      prcp_avg_Spring, data = model_data_li, 
+#                    mtry = 4/3, importance = TRUE, ntrees = 500)
+# svmfit <- svm(bloom_doy ~ afdd + tmax_avg_Winter + 
+#                 tmax_avg_Spring + tmin_avg_Spring + 
+#                 prcp_avg_Spring, data = model_data_li)
+
+li_pred <- round(predict(mod_spline_li, newdata = forecast_li))
+
+# round(predict(rf, newdata = forecast_li))
+# round(predict(svmfit, newdata = forecast_li))
+```
+
+# Washington
+
+```{r}
+# dailyweather <- get_ghcnd(station_id = "USC00186350", 
+#                           date_range = c("1950-01-01",  "2022-02-28"))
+# dailyweather <- imp_temperature(dailyweather, c("tmax", "tmin"))
+# forecast_dc <- forecast_weather(dailyweather)
+
+forecast_dc <- forecast_weather_new(model_data_dc)
+```
+
+```{r}
+mod_spline_dc <- gam(bloom_doy ~s(tmax_avg_Spring), data = model_data_dc)
+# rf <- randomForest(bloom_doy ~  afdd + tmax_avg_Winter + 
+#                      tmax_avg_Spring + tmin_avg_Spring + 
+#                      prcp_avg_Spring, data = model_data_dc, 
+#                    mtry = 4/3, importance = TRUE, ntrees = 500)
+# svmfit <- svm(bloom_doy ~ afdd + tmax_avg_Winter + 
+#                 tmax_avg_Spring + tmin_avg_Spring + 
+#                 prcp_avg_Spring, data = model_data_dc)
+
+dc_pred <- round(predict(mod_spline_dc, newdata = forecast_dc))
+
+# round(predict(rf, newdata = forecast_li))
+# round(predict(svmfit, newdata = forecast_li))
+```
+
+
+## Vancouver 
+
+```{r}
+# dailyweather <- get_ghcnd(station_id = "CA001108395", 
+#                           date_range = c("1950-01-01",  "2022-02-28"))
+# dailyweather <- imp_temperature(dailyweather, c("tmax", "tmin"))
+# forecast_vc <- forecast_weather(dailyweather)
+
+forecast_vc <- forecast_weather_new(model_data_vc)
+```
+
+```{r}
+model_data_vc_ssl <- model_data_vc %>% 
+  select(bloom_doy, tmax_avg_Winter, tmin_avg_Spring)
+label_index <- which(is.na(model_data_vc_ssl$bloom_doy) == 1)
+newL <- model_data_vc_ssl[-label_index, ] 
+newU <- model_data_vc_ssl[label_index, -1] 
+
+# Fit the model.
+regressors <- list(linearRegression = lm, knn=caret::knnreg, svm=e1071::svm)
+forecast_vc_ssl <- forecast_vc %>% select(tmax_avg_Spring)
+mod_ssl <- ssr("bloom_doy ~ .", newL, newU, regressors = regressors)
+
+# rf <- randomForest(bloom_doy ~  tmax_avg_Spring, data = newL, 
+#                    mtry = 4/3, importance = TRUE, ntrees = 500)
+# svmfit <- svm(bloom_doy ~  tmax_avg_Spring, data = newL,)
+
+vc_pred <- round(predict(mod_ssl, newdata = forecast_vc))
+# round(predict(rf, newdata = forecast_vc))
+# round(predict(svmfit, newdata = forecast_vc))
+```
+
+```{r}
+pred_all <- cbind(jp_pred, li_pred, dc_pred, vc_pred)
+pred_all <- data.frame(year = c(2022:2031), pred_all)
+colnames(pred_all) <- c("year", "kyoto", "liestal", "washingtondc", "vancouver")
+
+write.csv(pred_all, file = "cherry-predictions.csv", row.names = FALSE)
+```
+
+```{r}
+forecast_weather_all <- 
+  tibble(location = "washingtondc", forecast_dc, bloom_doy = dc_pred) %>%
+  bind_rows(tibble(location = "liestal", forecast_li, bloom_doy = li_pred)) %>%
+  bind_rows(tibble(location = "kyoto", forecast_jp, bloom_doy = jp_pred)) %>%
+  bind_rows(tibble(location = "vancouver", forecast_vc, bloom_doy = vc_pred))
+
+p1 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = tmax_avg_Spring, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() +
+  theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Average maximum temperature in Spring (°C)")
+
+p2 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = afdd, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() + theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Accumulated freezing degree days")
+  
+ggpubr::ggarrange(p1, p2, common.legend = T)
+```
+
+```{r}
+p1 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = tmax_avg_Winter, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() +
+  theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Average maximum temperature in Spring (°C)")
+
+p2 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = tmin_avg_Winter, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() + theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Accumulated freezing degree days")
+  
+ggpubr::ggarrange(p1, p2, common.legend = T)
+```
+
+```{r}
+p1 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = prcp_avg_Spring, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() +
+  theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Average maximum temperature in Spring (°C)")
+
+p2 <- model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = prcp_avg_Winter, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  xlim(c(1980, 2031)) +
+  theme_bw() + theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Accumulated freezing degree days")
+  
+ggpubr::ggarrange(p1, p2, common.legend = T)
+```
+
+```{r}
+model_data %>%
+  select(location, year, tmax_avg_Winter, tmax_avg_Spring,
+         tmin_avg_Winter, tmin_avg_Spring, prcp_avg_Winter, 
+         prcp_avg_Spring, afdd, bloom_doy) %>%
+  bind_rows(forecast_weather_all) %>%
+  ggplot(aes(x = year, y = bloom_doy, color = location))  +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  geom_vline(xintercept = 2022) +
+  scale_color_npg() +
+  theme_bw() + theme(legend.position = "top") +
+  facet_grid(rows = vars(location)) +
+  labs(x = "Year", y = "Peak bloom and predicted bloom")
+```
+

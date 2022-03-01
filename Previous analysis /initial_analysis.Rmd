@@ -1,0 +1,975 @@
+---
+title: "Peak Bloom Prediction Demo"
+author: "Siyue Yang"
+date: "02/18/2022"
+output:
+  html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE,
+                      fig.align = 'center',
+                      out.width = '80%')
+```
+
+```{r}
+library(tidyverse)
+library(rnoaa)     # Weather data
+library(imputeTS)  # Imputation on the temperature
+library(naniar)    # Visulize missing data 
+library(cowplot) 
+library(lubridate)
+```
+
+```{r}
+setwd("~/Documents/Github/peak-bloom-prediction")
+source("helper_functions.R")
+```
+
+
+
+# Tokoyo
+
+```{r}
+#cherry_jp <- read.csv("data/japan.csv")
+all_jp <- read.csv("data/kyoto.csv")
+```
+
+```{r}
+# Locations near Kyoto
+# cherry_jp %>%
+#   select(location, lat, long, alt) %>%
+#   unique() %>%
+#   filter(alt < 45 & alt > 35) %>%
+#   ggplot(aes(lat, long, label = location)) +
+#   geom_point() + 
+#   geom_text(vjust = 0, nudge_y = 0.5)
+# 
+# cherry_jp %>%
+#   filter(location == "Japan/Kumamoto") %>%
+#   ggplot(aes(x = year, y = bloom_doy)) +
+#   geom_point() +
+#   geom_step(linetype = 'dotted', color = 'gray50') +
+#   labs(x = "Year", y = "Peak bloom (days since Jan 1st)")
+# 
+# cherry_jp %>%
+#   filter(location == "Japan/Kyoto") %>%
+#   ggplot(aes(x = year, y = bloom_doy)) +
+#   geom_point() +
+#   geom_step(linetype = 'dotted', color = 'gray50') +
+#   labs(x = "Year", y = "Peak bloom (days since Jan 1st)")
+```
+
+```{r}
+# all_jp <- read.csv("data/kyoto.csv")
+
+# We will not use all information after 1950 for Japan data, since the there is no weather data. 
+# all_jp %>%
+#   ggplot(aes(x = year, y = bloom_doy)) +
+#   geom_point() +
+#   scale_x_continuous(breaks = seq(810, 2020, by = 40)) +
+#   geom_step(linetype = 'dotted', color = 'gray50') +
+#   labs(x = "Year", y = "Peak bloom (days since Jan 1st)") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+all_jp %>%
+  filter(year > 1880) %>%
+  ggplot(aes(x = year, y = bloom_doy)) +
+  geom_point() +
+  scale_x_continuous(breaks = seq(1880, 2020, by = 10)) +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  labs(x = "Year", y = "Peak bloom (days since Jan 1st)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Get weather variables
+
+
+## GHCND data
+
+GHCND only contains Japan weather data after 1945. In fact, 1945-1950 most of the data are missing. Therefore, we only use data starting from 1950.
+
+```{r}
+# options(noaakey = "glXNoFyvOBlaNQHclcFOkcQTFFFLKSdw")
+# ncdc_stations(datasetid='GHCND', stationid='GHCND:JA000047759')
+```
+
+### Temperature
+- tmax = maximum temperature (tenths of degrees C)
+- tmin = minimum termperature (tenths of degrees C)
+- tavg = average 
+
+### Precipitation 降雨量
+- prcp = precipitation (tenths of mm)
+
+### Winter 下雪
+- snwd = snow depth, most of them are NA. 
+
+
+```{r}
+cherry.weathers <- 
+  tibble(location = "washingtondc", get_seasons.temperature("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_seasons.temperature("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_seasons.temperature("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_seasons.temperature("CA001108395")))
+```
+
+# Data sanity check
+
+1965, 2005 and 2022 data are missing, only contain 1 months data. So we remove the data. 
+
+```{r}
+# weather %>%
+#   group_by(year) %>%
+#   summarise(n = n()) %>%
+#   right_join(data.frame(year = c(1950:2022), n = rep(0, 73)), by = "year") %>%
+#   filter(is.na(n.x))
+
+# Use 1980s later
+'%ni%' <- Negate("%in%")
+weather <- weather %>% filter(year >= 1980) %>% filter(year %ni% c(2005, 2022))
+```
+
+A lot of them are missing. 
+
+```{r}
+vis_miss(weather)
+```
+
+## Imputation
+
+```{r}
+imp_temperature <- function(dat = weather, temps = "tmin") { 
+  
+  for (temp in temps) {
+    # Convert to time series
+    temp_ori <- dat[, temp]
+    temp_series <- ts(temp_ori, frequency = 1)
+    dat$na <- is.na(temp_ori)
+    
+    # Use Kalman smoother to impute. Other options are also available
+    dat$imp <- na_kalman(temp_series)
+    
+    n_col <- ncol(dat)
+    colnames(dat)[n_col-1] <- paste0(temp, "_na")
+    colnames(dat)[n_col] <- paste0(temp, "_imp")
+  }
+  return(dat)
+}
+```
+
+```{r}
+weather <- imp_temperature(weather, c("tmax", "tavg", "tmin"))
+```
+
+A demo of the imputation results. 
+
+
+
+```{r}
+missing_idx <- which(is.na(weather$tmin))[1:5]
+weather$date[missing_idx]
+
+# weather %>%
+#   filter(year >= "1964-12-01" & year <= "1972-07-31") %>%
+#   ggplot(aes(date, tmin_tmp, color = factor(tmin_na))) +
+#   geom_point()
+
+weather %>%
+  filter(year >= "1994-12-01" & year <= "1995-07-31") %>%
+  ggplot(aes(date, tmin_imp, color = factor(tmin_na))) +
+  geom_point()
+```
+
+### Temperature
+
+```{r}
+get_colour <- function(df){
+  colfunc <- colorRampPalette(c("blue", "red"))
+  my_colour <- colfunc(12)
+   
+  df %>%
+    group_by(month_name) %>%
+    summarise(month_mean = mean(tmax_avg)) %>%
+    arrange(month_mean) %>%
+    pull(month_name) %>%
+    as.integer() -> my_order
+   
+  my_colour[match(1:12, my_order)]
+}
+```
+
+```{r}
+# https://davetang.org/muse/2020/01/08/plotting-weather-data-using-r/
+month_tmax <- weather %>% 
+  group_by(month_name, year) %>%
+  summarize(tmax_avg = mean(tmax_imp),
+            tmin_avg = mean(tmin_imp),
+            tavg_avg = mean(tavg_imp),
+            prcp_sum = sum(prcp, na.rm = TRUE),
+            prcp_avg = mean(prcp, na.rm = TRUE)) 
+
+my_colour <- get_colour(month_tmax %>% select(- tmin_avg, - tavg_avg))
+```
+
+
+```{r}
+a <- ggplot(month_tmax, aes(year, tmax_avg, colour = month_name)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_manual(values = my_colour) +
+  labs(title = "Monthly mean maximum temperature", 
+       subtitle = "January 1950 - Feburary 2022", y = "Degrees Celsius") +
+  facet_wrap(~month_name) +
+  NULL
+
+b <- ggplot(month_tmax, aes(year, tmin_avg, colour = month_name)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_manual(values = my_colour) +
+  labs(title = "Monthly mean minimum temperature", 
+       subtitle = "January 1950 - Feburary 2022", y = "Degrees Celsius") +
+  facet_wrap(~month_name) +
+  NULL
+
+plot_grid(a, b)
+```
+
+```{r}
+a <- month_tmax %>%
+  group_by(year) %>%
+  summarise(year_mean = mean(tmax_avg)) %>%
+  ggplot(., aes(year, year_mean)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = "loess") +
+    theme(axis.title.x = element_blank(),
+          legend.position = "none") +
+    labs(title = "Annual mean maximum temperature", subtitle = ": 1980-2022", y = "Degrees Celsius") +
+    NULL
+ 
+b <- month_tmax %>%
+  group_by(year) %>%
+  summarise(year_mean = mean(tmin_avg)) %>%
+  ggplot(., aes(year, year_mean)) +
+    geom_point() +
+    geom_line() +
+    geom_smooth(method = "loess") +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = "none") +
+    labs(title = "Annual mean minimum temperature", subtitle = ": 1980-2022", y = "Degrees Celsius")  +
+    NULL
+
+plot_grid(a, b, nrow = 1, rel_widths = c(1, 1))
+```
+
+
+```{r}
+# Scatter plot of low vs high daily temperatures, with a smoother curve for each season
+# ggplot(weather, aes(x = tmin_imp, y = tmax_imp)) +
+#   geom_point(colour = "firebrick", alpha = 0.1) + 
+#   geom_smooth(aes(colour = season), se = F, size = 1.5) +
+#   ggtitle ("Daily low and high temperatures") +
+#   xlab("Daily low temperature ( ºC )") +  ylab ("Daily high temperature ( ºC )") 
+```
+
+
+```{r}
+# https://www.r-bloggers.com/2015/03/part-3a-plotting-with-ggplot2/
+# Distribution of the average temperature by season - density plot
+season_tmax <- weather %>% 
+  group_by(season, year) %>%
+  summarize(tmax_avg = mean(tmax, na.rm= TRUE),
+            tmin_avg = mean(tmin, na.rm= TRUE),
+            tavg_avg = mean(tavg, na.rm= TRUE)) 
+
+ggplot(season_tmax, aes(x = tmax_avg, colour = season)) +
+  geom_density() +
+  scale_x_continuous(limits = c(5,30), breaks = seq(5,30,5)) +
+  ggtitle ("Temperature distribution by season") +
+  xlab("Average temperature ( ºC )") +  ylab ("Probability") 
+```
+
+#### Freezing dates
+
+"Gardeners will keep an eye on the weather forecast, and keen gardeners will want to understand historical trends as well. An area of particular interest is the last freeze each spring. If seeds or starts are planted too early, they may succumb to a late frost. On the other end of the growing season, the first freeze each fall is a good indication of when to ensure the harvest is completed for crops that cannot withstand an early frost."
+
+```{r}
+# Accumulative freezing days
+# Return a dataframe with year as the index variable and 
+get_afdd <- function(dat) {
+  
+  freeze_days <- dat %>% mutate(yday = yday(date)) %>% group_by(year) %>% filter(tmin_imp <= 0)
+  
+  # Number of accumulative freezing days
+  freeze_days_n <- freeze_days %>% group_by(year) %>% summarise(afdd = n()) 
+  
+  # First and last freeze
+  first_freeze <- freeze_days %>% group_by(year) %>% summarise(first_freeze_date = min(date))
+  last_freeze <- freeze_days %>% group_by(year) %>% summarise(last_freeze_date = max(date))
+
+  first_freeze_yday <- first_freeze %>% mutate(first_freeze_yday = yday(first_freeze_date))
+  last_freeze_yday <- last_freeze %>% mutate(last_freeze_yday = yday(last_freeze_date))      
+  
+  year_range <- c(min(dat$year) : max(dat$year))
+  
+  freeze_info <- merge(data.frame(year = year_range), freeze_days_n, all.x = TRUE) 
+  freeze_info <- merge(freeze_info, first_freeze_yday, by = "year", all.x = TRUE)
+  freeze_info <- merge(freeze_info, last_freeze_yday, by = "year", all.x = TRUE)
+  
+  return(freeze_info)
+}
+
+get_freeze_days <- function(dat) {
+  freeze_days <- dat %>% mutate(yday = yday(date)) %>% group_by(year) %>% filter(tmin_imp <= 0)
+  return(freeze_days)
+}
+```
+
+
+
+```{r}
+# Accumulative growing days
+# Average temperature = (tmax + tmin)/2 > 0
+get_agdd <- function(dat) {
+  
+  growing_days <- dat %>% mutate(yday = yday(date)) %>% group_by(year) %>% 
+    mutate(tavg_cal = (tmax_imp + tmin_imp)/2) %>% filter(tavg_cal > 0)
+  
+  # Number of accumulative growing days
+  grow_days_n <- growing_days %>% group_by(year) %>% summarise(agdd = n()) 
+  
+  # First and last freeze
+  first_grow <- growing_days %>% group_by(year) %>% summarise(first_grow_date = min(date))
+  last_grow <- growing_days %>% group_by(year) %>% summarise(last_grow_date = max(date))
+
+  first_grow_yday <- first_grow %>% mutate(first_grow_yday = yday(first_grow_date))
+  last_grow_yday <- last_grow %>% mutate(last_grow_yday = yday(last_grow_date))      
+  
+  year_range <- c(min(dat$year) : max(dat$year))
+  
+  freeze_info <- merge(data.frame(year = year_range), grow_days_n, all.x = TRUE) 
+  freeze_info <- merge(freeze_info, first_grow_yday, by = "year", all.x = TRUE)
+  freeze_info <- merge(freeze_info, last_grow_yday, by = "year", all.x = TRUE)
+  
+  return(freeze_info)
+}
+```
+
+```{r}
+get_agdd(weather)
+```
+
+
+```{r}
+
+# # Get all freeze days, tmin < 0 C
+# freeze_days <- weather %>% mutate(yday = yday(date)) %>% group_by(year) %>% filter(tmin_imp <= 0) 
+# 
+# # First and last freeze
+# first_freeze <- freeze_days %>% group_by(year) %>% summarise(min = min(date))
+# last_freeze <- freeze_days %>% group_by(year) %>% summarise(max = max(date))
+# 
+# first_freeze_yday <- first_freeze %>% mutate(yday = yday(min))
+# last_freeze_yday <- last_freeze %>% mutate(yday = yday(max))           
+
+
+adgg_jp <- get_afdd(weather)
+freeze_days <- get_freeze_days(weather)
+
+ggplot() +
+  geom_point(data = freeze_days, aes(y = year, x = as.Date(yday, origin='2022-01-01')), 
+             color = "gray", size = 0.8) +
+  geom_point(data = adgg_jp, aes(y=year, x = as.Date(first_freeze_yday, origin='2022-01-01')),
+             fill = "purple",shape = 21, size = 3, color = 'black') +
+  geom_point(data = adgg_jp, aes(y = year, x = as.Date(last_freeze_yday, origin='2022-01-01')) 
+             ,fill = "blue",shape = 21, size = 3, color = 'black') +
+  scale_y_reverse(breaks = seq(1950, 2022, 10), minor_breaks = seq(1944, 2022, 2)) +
+  scale_x_date(date_labels = "%b", breaks = "month") +
+  ggtitle("Yearly Last Freeze (Spring) and First Freeze (Winter) Dates") +
+  xlab("Date")
+```
+Blue dots indicate the last freeze of winter
+Purple dots indicate the first freeze of fall
+Gray dots indicate days with a min temp at or below 0 tenths of degrees C
+
+
+```{r}
+# 1965 - 1972 no freezing days
+freeze_days %>%
+  group_by(year) %>%
+  summarise(n = n()) %>%
+  right_join(data.frame(year = c(1980:2021), n = rep(0, 42)), by = "year") %>%
+  mutate(n = n.x + n.y) %>%
+  left_join(all_jp, by = "year") %>%
+  ggplot() +
+  geom_bar(aes(x = year, y = n), stat = "identity") +
+  geom_point(aes(x = year, y = bloom_doy))
+  xlab("Number of freezing days")
+```
+
+- 最近10年最后化冰日提前了，大概在2月底。
+- 有的时候结冰期（紫色）退后了。
+
+### Rainfall
+
+```{r}
+weather %>%
+  group_by(year, month) %>%
+  summarise(prcp_sum = sum(prcp, na.rm = T)) %>%
+  ggplot(aes(x = factor(month), y = prcp_sum)) +
+  geom_boxplot() +
+  theme_classic() +
+  ggtitle("Cumulative rainfall by month at Kyoto (1953 - 2022)") 
+
+weather %>%
+  group_by(year, month) %>%
+  summarise(prcp_sum = mean(prcp, na.rm = T)) %>%
+  ggplot(aes(x = year, y = prcp_sum)) +
+  geom_point() +
+  theme_classic() +
+  ggtitle("Yearly inches of rainfall by month at Kyoto (1953 - 2022)") 
+```
+
+```{r}
+# weather %>% 
+#   mutate(prcp_avg_all = mean(prcp, na.rm = T)) %>%
+#   mutate(prcp_pos = case_when(prcp - prcp_avg_all > 0 ~ prcp - prcp_avg_all, TRUE ~ 0),
+#          prcp_neg = case_when(prcp - prcp_avg_all < 0 ~ prcp - prcp_avg_all, TRUE ~ 0)) %>%
+#   ggplot(aes(x = year)) + 
+#   geom_ribbon(aes(ymin = 0, ymax = prcp_pos, fill="positive")) +
+#   geom_ribbon(aes(ymin = prcp_neg, ymax = 0, fill="negative")) +
+#   scale_fill_manual(name="",values=c("#D6604D", "#4393C3")) +
+#   ylim(-100, 100) +
+#   ylab("rainfall anomaly in mm")
+```
+
+
+# Modeling
+
+```{r}
+cherry <- read.csv("data/washingtondc.csv") %>% 
+  bind_rows(read.csv("data/liestal.csv")) %>% 
+  bind_rows(read.csv("data/kyoto.csv"))
+
+model_data <- cherry.weathers %>% merge(cherry, by = c("year", "location"), all.y = TRUE, all.x = TRUE) %>%
+  filter(year >= 1950)
+```
+
+```{r}
+model_data_jp <- model_data %>% 
+  filter(location == "kyoto") %>%
+  drop_na()
+```
+
+
+
+```{r}
+library(corrplot)
+corr_data <- model_data_jp %>% select(where(is.numeric)) %>%
+  select(-c(lat, long, alt)) 
+
+corr_data <- cor(corr_data)
+corrplot(corr_data)
+```
+
+
+```{r}
+# mod1 <- lm(bloom_doy ~ year + afdd + agdd + 
+#              tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter + 
+#                first_grow_yday + first_freeze_yday , data = model_data_jp)
+# summary(mod1)
+
+
+# https://www.r-bloggers.com/2017/01/doing-magic-and-analyzing-seasonal-time-series-with-gam-generalized-additive-model-in-r/
+library(mgcv)
+# mod2 <- gam(bloom_doy ~ s(tmax_avg_Spring, bs = "ps", k = 7) + tmin_avg_Spring, data = model_data_jp)
+# summary(mod2)
+
+gam.m3 <- mgcv::gam(bloom_doy ~ s(afdd)  +
+             s(tmax_avg_Winter) + s(tmax_avg_Spring) + s(prcp_avg_Winter) + s(tmin_avg_Spring) +
+                s(prcp_avg_Spring),
+              data = model_data_jp)
+layout(matrix(1:6, nrow = 3))
+plot(gam.m3, shade = TRUE)
+
+summary(gam.m3)
+
+```
+
+```{r}
+library(data.table)
+
+# datas <- rbindlist(list(model_data_jp[, c("bloom_doy", "year")],
+#                         data.table(value = mod2$fitted.values,
+#                                    data_time = model_data_jp[, "year"])))
+# datas[, type := c(rep("Real", nrow(model_data_jp)), rep("Fitted", nrow(model_data_jp)))]
+#  
+# ggplot(data = datas, aes(year, bloom_doy, group = type, colour = type)) +
+#   geom_line(size = 0.8) +
+#   theme_bw() +
+#   labs(x = "Time", y = "Day of year",
+#        title = "Fit from GAM n.1")
+
+datas <- rbindlist(list(model_data_jp[, c("bloom_doy", "year")],
+                        data.table(value = gam.m3$fitted.values,
+                                   data_time = model_data_jp[, "year"])))
+datas[, type := c(rep("Real", nrow(model_data_jp)), rep("Fitted", nrow(model_data_jp)))]
+ 
+ggplot(data = datas, aes(year, bloom_doy, group = type, colour = type)) +
+  geom_line(size = 0.8) +
+  theme_bw() +
+  labs(x = "Time", y = "Day of year",
+       title = "Fit from GAM n.1")
+```
+
+```{r}
+gam.m3 <- mgcv::gam(bloom_doy ~ s(tmax_avg_Winter) + s(tmax_avg_Spring) +  
+                      t2(tmin_avg_Spring) + s(prcp_avg_Spring),
+              data = model_data_jp)
+
+gam1 <- mgcv::gam(bloom_doy ~ s(afdd, prcp_avg_Spring) + s(tmax_avg_Winter) + s(tmin_avg_Spring, tmax_avg_Spring), data = model_data_jp)
+
+# year + afdd + agdd + 
+#              tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter + 
+#                first_grow_yday + first_freeze_yday , data = model_data_jp)
+# layout(matrix(1:2, nrow = 4))
+# plot(gam.m3, shade = TRUE)
+
+summary(gam.m3)$r.sq
+summary(gam1)$r.sq
+
+# AIC(gam.m3, gam1)
+```
+
+```{r}
+ggplot(model_data_jp) +
+  geom_point(aes(afdd, bloom_doy, color = tmax_avg_Winter)) 
+```
+
+
+
+```{r}
+gam.check(gam.m3)
+```
+
+
+# Prediction
+
+```{r}
+train_data <- model_data_jp[1:60, ]
+test_data <- model_data_jp[61:70, ]
+```
+
+```{r}
+train_mod <- mgcv::gam(bloom_doy ~ s(afdd, prcp_avg_Spring) + s(tmax_avg_Winter) + s(tmin_avg_Spring, tmax_avg_Spring), data = model_data_jp)
+
+summary(train_mod)
+
+y_hat_train <- predict(train_mod, data = train_data)
+train_MSE <- mean(abs(train_data$bloom_doy - round(y_hat_train)))
+
+y_hat_test <- predict(train_mod, newdata = test_data)
+test_MSE <- mean(abs(test_data$bloom_doy - round(y_hat_test)))
+
+nonp <- round(y_hat_test)
+train_MSE
+test_MSE
+# ?cross-validation?
+```
+
+```{r}
+library(randomForest)
+# random forest
+rf <- randomForest(bloom_doy ~  afdd +  tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter, data=train_data, mtry = 4/3, importance = TRUE, ntrees = 500)
+rf
+
+varImpPlot(rf, main = "Variable importance")
+```
+
+```{r}
+
+# pred_rf <- predict(rf_model, data.frame(matrix_test)) + mean(trend_for)
+# 
+# 
+# pred_rf <- data.table(value = pred_rf, Var2 = 1:48, Var1 = "RF")
+#  
+# pred_true <- data.table(value = data_test$value, Var2 = 1:48, Var1 = "Real")
+# preds_all <- rbindlist(list(pred_ave_rpart, pred_ave_ctree, pred_rf, pred_true), use.names = T)
+#  
+# ggplot(preds_all, aes(Var2, value, color = as.factor(Var1))) +
+#   geom_line(alpha = 0.7, size = 1.2) +
+#   labs(x = "Time", y = "Load (kW)", title = "Comparison of Ensemble Learning forecasts") +
+#   guides(color=guide_legend(title="Method")) +
+#   theme_ts
+```
+
+
+```{r}
+rf <- round(predict(rf, test_data))
+shiki <- c(97,90,88,85,82,88,84,87,86,87)
+avg <- round((rf + shiki + nonp)/3)
+cbind(true = test_data$bloom_doy, rf, shiki, nonp, avg)
+
+cal_abe <- function(true, test) {
+  mean(abs(true - test))
+}
+
+
+cal_abe(test_data$bloom_doy, rf)
+cal_abe(test_data$bloom_doy, shiki)
+cal_abe(test_data$bloom_doy, nonp)
+cal_abe(test_data$bloom_doy, avg)
+```
+
+
+
+```{r}
+model_data_li <- model_data %>% 
+  filter(location == "liestal") %>%
+  drop_na()
+```
+
+```{r}
+train_data <- model_data_li[1:56, ]
+test_data <- model_data_li[57:66, ]
+
+train_mod <- mgcv::gam(bloom_doy ~ s(prcp_avg_Spring) + s(tmax_avg_Winter) + s(tmin_avg_Spring, tmax_avg_Spring), data = model_data_li)
+
+y_hat_train <- predict(train_mod, data = train_data)
+train_MSE <- mean(abs(train_data$bloom_doy - round(y_hat_train)))
+
+y_hat_test <- predict(train_mod, newdata = test_data)
+test_MSE <- mean(abs(test_data$bloom_doy - round(y_hat_test)))
+
+train_MSE
+test_MSE
+```
+
+```{r}
+library(randomForest)
+# random forest
+rf <- randomForest(bloom_doy ~  afdd +  tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter, data=train_data, mtry = 4/3, importance = TRUE, ntrees = 500)
+rf
+
+```
+
+
+```{r}
+nonp <- round(y_hat_test)
+rf <- round(predict(rf, test_data))
+shiki <- c(96, 70, 77, 107, 72, 87, 85, 86, 71, 84)
+avg <- round((rf + shiki + nonp)/3)
+cbind(true = test_data$bloom_doy, rf, shiki, nonp, avg)
+
+cal_abe <- function(true, test) {
+  mean(abs(true - test))
+}
+
+
+cal_abe(test_data$bloom_doy, rf)
+cal_abe(test_data$bloom_doy, shiki)
+cal_abe(test_data$bloom_doy, nonp)
+cal_abe(test_data$bloom_doy, avg)
+```
+
+
+```{r}
+model_data_dc <- model_data %>% 
+  filter(location == "washingtondc") %>%
+  drop_na()
+```
+
+```{r}
+train_data <- model_data_dc[1:60, ]
+test_data <- model_data_dc[61:70, ]
+
+train_mod <- mgcv::gam(bloom_doy ~ s(prcp_avg_Spring) + s(tmax_avg_Winter) + s(tmin_avg_Spring, tmax_avg_Spring), data = model_data_dc)
+
+y_hat_train <- predict(train_mod, data = train_data)
+train_MSE <- mean(abs(train_data$bloom_doy - round(y_hat_train)))
+
+y_hat_test <- predict(train_mod, newdata = test_data)
+test_MSE <- mean(abs(test_data$bloom_doy - round(y_hat_test)))
+
+train_MSE
+test_MSE
+```
+
+```{r}
+library(randomForest)
+# random forest
+rf <- randomForest(bloom_doy ~  afdd +  tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter, data=train_data, mtry = 4/3, importance = TRUE, ntrees = 500)
+rf
+
+```
+
+```{r}
+nonp <- round(y_hat_test)
+rf <- round(predict(rf, test_data))
+shiki <- c(85, 88, 90, 88, 83, 85, 92, 90, 80, 89)
+avg <- round((rf + shiki + nonp)/3)
+cbind(true = test_data$bloom_doy, rf, shiki, nonp, avg)
+
+cal_abe <- function(true, test) {
+  mean(abs(true - test))
+}
+
+
+cal_abe(test_data$bloom_doy, rf)
+cal_abe(test_data$bloom_doy, shiki)
+cal_abe(test_data$bloom_doy, nonp)
+cal_abe(test_data$bloom_doy, avg)
+```
+
+SVM
+
+```{r}
+library(e1071)
+svmfit = svm(bloom_doy ~ afdd + tmax_avg_Winter + tmax_avg_Spring + tmin_avg_Spring + prcp_avg_Winter, data=train_data)
+summary(svmfit)
+
+svm_predict <- round(predict(svmfit, test_data))
+
+cal_abe(train_data$bloom_doy, svm_predict)
+cal_abe(test_data$bloom_doy, svm_predict)
+
+```
+
+
+
+# Forecast
+
+
+```{r}
+dailyweather <- get_ghcnd(station_id = "JA000047759", info_list = c("tmax", "tmin", "prcp"), date_range = c("1950-01-01", "2022-01-31"))
+
+dailyweather <- imp_temperature(dailyweather, c("tmax", "tmin"))
+
+forecast_jp <- forecast_weather(dailyweather)
+```
+
+
+
+
+Of course, the data has seasonality.... 
+
+1. benchmark methods to forecast
+
+$$y_t = y_{t-s} + e_t$$
+
+```{r}
+# residual sd = 1.7848 
+fit <- snaive(ts_jp)
+print(summary(fit))
+checkresiduals(fit)
+```
+
+
+2. Fit ETS method, classic time series forcasting model
+
+```{r}
+fit_ets <- ets(ts_jp)  # SD =  1.735
+print(summary(fit_ets))
+checkresiduals(fit_ets)
+```
+
+3. Fit ARIMA model
+
+```{r}
+fit_arima <- auto.arima(ts_jp)  # SD = 1.421267, Ljung-Box test p-val = 0.57
+print(summary(fit_arima))
+checkresiduals(fit_arima)
+```
+
+```{r}
+fcst <- forecast(fit_arima, h = 120)
+autoplot(fcst, include = 100)
+```
+
+
+
+
+## Cluster
+
+```{r}
+library(mclust)
+
+cherry_k <- read.csv("data/south_korea.csv") %>% mutate(Country = "Korea")
+cherry_s <- read.csv("data/meteoswiss.csv") %>% mutate(Country = "Swiss")
+cherry_j <- read.csv("data/japan.csv") %>% mutate(Country = "Japan")
+
+cherry_all <- cherry_k %>% bind_rows(cherry_s) %>% bind_rows(cherry_j)
+  
+
+cherry_all %>% 
+  ggplot() +
+  geom_point(aes(x = year, y = bloom_doy, color = Country)) +
+  xlim(c(1950, 2021)) 
+
+cherry_all %>% 
+  ggplot() +
+  geom_density(aes(x = bloom_doy, fill = Country)) 
+
+mod1 <- Mclust(cherry_all$bloom_doy)
+
+summary(mod1, parameters = T)
+```
+
+```{r}
+pheno <- read_csv("data/USA-NPN_status_intensity_observations_data.csv")
+
+pheno %>%
+  group_by(Genus, Species, Common_Name ) %>%
+  summarise(n = n())
+
+
+pheno$date <- as.POSIXct(pheno$Observation_Date, format = "%m/%d/%Y")
+pheno$year <- format(pheno$date, format = "%Y")
+
+yedoensis <- pheno %>%
+  filter(Species == "yedoensis") %>%
+  group_by(State, year) %>%
+  mutate(n = n()) %>%
+  filter(n >= 10) %>%
+  unique() %>%
+  filter(Day_of_Year >= quantile(Day_of_Year, 0.69) & Day_of_Year <= quantile(Day_of_Year, 0.71))
+  
+
+yedoensis
+
+yedoensis %>%
+  ggplot() +
+  geom_point(aes(x = factor(year), y = as.integer(Day_of_Year), color = factor(State)))
+
+yedoensis %>%
+  ggplot() +
+  geom_density(aes(x = Day_of_Year))
+
+mod1 <- Mclust(yedoensis$Day_of_Year)
+
+summary(mod1, parameters = T)
+
+```
+
+```{r}
+date_van <- c("03/31/2004", "04/09/2005", "03/30/2006", "04/01/2007", "03/26/2008", "04/01/2009", "03/31/2010", "03/29/2011", "03/20/2012", "04/09/2013", "04/10/2014", "04/10/2015", "03/25/2016", "03/25/2017", "04/05/2018", "04/01/2019", "03/20/2020", "03/28/2021")
+
+date_van <- data.frame(date = date_van) %>%
+  mutate(date = as.POSIXct(date, format = '%m/%d/%Y')) %>%
+  mutate(year = as.integer(format(date, "%Y"))) %>%
+  mutate(bloom_doy = yday(date)) %>%
+  mutate(location = "vancouver")
+
+ggplot() +
+  geom_point(data = model_data, aes(x = year, y = bloom_doy, color = location)) +
+  geom_point(data = date_van, aes(x = year, y = bloom_doy, color = "pink"))
+
+cherry_all <- model_data %>%
+  select(year, bloom_doy, location) %>%
+  bind_rows(date_van %>% select(year, bloom_doy, location)) 
+  
+cherry_all %>%
+  ggplot() +
+  geom_boxplot(aes(x = location, y = bloom_doy))
+
+cherry_all %>%
+  ggplot() +
+  geom_density(aes(x = bloom_doy, color = location))
+```
+
+```{r}
+cherry <- read.csv("data/japan.csv") %>% 
+  mutate(Country = "Jp") %>%
+  bind_rows(read.csv("data/meteoswiss.csv") %>% mutate(Country = "Sw")) %>% 
+  bind_rows(read.csv("data/south_korea.csv") %>% mutate(Country = "Kr")) 
+
+ggplot(data = cherry) +
+  geom_density(aes(x = bloom_doy, color = Country))
+```
+
+Semi-supervised learning
+
+```{r}
+library(ssr)
+
+train_data <- model_data_vc[1:40, ] 
+train_data <- train_data %>% 
+  select(bloom_doy, afdd, tmax_avg_Winter, tmax_avg_Spring, prcp_avg_Winter)
+
+test_data <- model_data_vc[41:47, ] 
+test_data <- test_data %>%
+  select(bloom_doy, afdd, tmax_avg_Winter, tmax_avg_Spring, prcp_avg_Winter)
+
+set.seed(1234)
+
+# # Split the dataset into 70% for training and 30% for testing.
+# split1 <- split_train_test(dataset, pctTrain = 70)
+# 
+# # Choose 5% of the train set as the labeled set L and the remaining will be the unlabeled set U.
+# split2 <- split_train_test(split1$trainset, pctTrain = 5)
+
+
+label_index <- which(is.na(train_data$bloom_doy) == 1)
+L <- train_data[-label_index, ] # This is the labeled dataset.
+
+U <- train_data[label_index, -1] # Remove the labels since this is the unlabeled dataset.
+
+testset <- test_data %>% drop_na() # This is the test set.
+```
+
+```{r}
+regressors <- list(linearRegression=lm, knn=caret::knnreg, svm=e1071::svm)
+
+# Fit the model.
+model <- ssr("bloom_doy ~ .", L, U, regressors = regressors, testdata = testset)
+```
+
+```{r}
+U
+```
+
+
+
+```{r}
+regressors <- list("lm", "rvmLinear")
+```
+
+```{r}
+plot(model)
+
+# Get the predictions on the testset.
+predictions <- predict(model, testset)
+
+# Calculate RMSE on the test set.
+rmse.result <- sqrt(mean((predictions - testset$bloom_doy)^2))
+rmse.result
+#> [1] 0.1113865
+
+plot(model, metric = "mae", ptype = 2)
+```
+
+```{r}
+train_mod <- mgcv::gam(bloom_doy ~ s(tmax_avg_Spring) , data = L)
+
+y_hat_test <- predict(train_mod, newdata = testset)
+
+nonp <- round(y_hat_test)
+
+cal_abe(testset$bloom_doy, round(predictions))
+
+cal_abe(testset$bloom_doy, nonp)
+
+cbind(round(predictions), nonp, testset$bloom_doy)
+
+
+```
+

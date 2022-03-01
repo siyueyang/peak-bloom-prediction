@@ -62,7 +62,7 @@ For example, the latest 3 observations for each location can be extracted with:
 ```{r}
 cherry %>% 
   group_by(location) %>% 
-  slice_tail(n = 3)
+  slice_head(n = 3)
 ```
 
 ## Visualizing the time series
