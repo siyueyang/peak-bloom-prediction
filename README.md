@@ -35,6 +35,10 @@ Below shows the distribution of the peak bloom dates.
 
 ![](img/bloom_peak_time.png)
 
+We construct another feature "peak bloom days" since January 1st of the year untial peak bloom for every record. 
+
+![](img/peak_bloom_days.png)
+
 We noticed that weather data is missing
 across several years, thus using the Kalman Smoothing time series model to impute the
 daily temperature. 
