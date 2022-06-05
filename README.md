@@ -1,5 +1,5 @@
 
-![](https://img.shields.io/badge/R-v4.1.2-green.svg)
+![](https://badgen.net/badge/cherry-prediction/competition/pink) ![](https://badgen.net/badge/best-narrative/statistics/red) 
 
 # Cherry blossom peak bloom prediction
 
