@@ -33,7 +33,7 @@ The competition provides cleaned data in the [Github repo](https://github.com/GM
 
 ## Our attempts
 
-#### Data preparation
+#### 1. Data preparation
 
 We extracted Vancouver bloom peak dates during 2004-2021 from the National Park Website. 
 Below shows the distribution of the peak bloom dates.
@@ -70,7 +70,7 @@ Additionally, we summarized daily weather data into
 - average precipitation in Winter (PRCPW)
 - average precipitation in Spring (PRCP-S)
 
-#### Model training for Kyoto, Liestal, Washington
+#### 2. Model training for Kyoto, Liestal, Washington
 
 We split the data into the validation set (10 years) and training set (otherwise) and considered the following model:
 
@@ -87,7 +87,7 @@ Considering that the spline method expresses the coefficients as a linear combin
 spline basis, we finally chose **spline method** as the estimation technique in that it facilitates
 the prediction process by directly giving us the exact form of the coefficient functions.
 
-#### Model training for Vancouver
+#### 3. Model training for Vancouver
 
 The fully labeled training set only has 17 years of data for Vancouver (2004-2021). Due to the limited sample size and the relatively large number of covariates, training a common statistical or machine learning model with such
 dataset might result in overfitting, further leading to low out-of-sample accuracy.  Therefore,
@@ -96,11 +96,11 @@ labeled and unlabeled data. When the weather information contained in the unlabe
 is related to the bloom days, the model estimation efficiency will be improved. In practice,
 this means we need fewer samples to get a desired estimating standard error.
 
-#### Prediction of the covariates and response
+#### 4. Prediction of the covariates and response
 
 As the weather data is not available for the next 10 years, we use ARIMA to predict the weather (covariates) first and fitted bloom date prediction model using the predicted covariates.
 
-#### Results
+#### 5. Results
 
 Below is the peak bloom dates of the four sites, with the predicted ones (2022-2031) presented after the vertical line.  
 
@@ -114,7 +114,13 @@ incorporate more climate information so as to investigate the possible interplay
 cherry blossom and global warming.
 
 
-#### Links
+## Links
 
 - [Our code and analysis](https://github.com/siyueyang/peak-bloom-prediction/blob/main/final_analysis.Rmd) for reproducibility 
 - [Our narrative report](https://github.com/siyueyang/peak-bloom-prediction/blob/main/Cherry_Blossom_Prediction.pdf)
+
+## Contacts
+
+Should you have any questions, comments regarding the submission, please feel free to email us.  We are happy to discuss and answer questions. 
+
+- syue.yang@mail.utoronto.ca
