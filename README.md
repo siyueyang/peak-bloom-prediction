@@ -47,7 +47,7 @@ The cherry blossom is highly related to the temperature, as evidenced from a sea
 
 Here is the monthly average maximum and minimum temperature across four sies. Due to the different temperature trends, seperate models or hierarchical models should be considered for forecasting the bloom dates. We used separate models in our analysis. 
 
-![](img/seansonal_temp.png)
+![](img/seasonal_temp.png)
 
 
 Additionally, we summarised daily weather data into 
