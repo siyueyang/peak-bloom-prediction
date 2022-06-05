@@ -6,4 +6,4 @@ This is a repository created by Miaoshiqi Liu and Siyue Yang for the submission 
 We won the Award for Best Narrative (Statistics). Please see more in the [Winners of the First International Cherry Blossom Prediction Competition](https://competition.statistics.gmu.edu/winners-2022/).
 
 
-Please find more details in our [report]().
+Please find more details in our [report](https://github.com/siyueyang/peak-bloom-prediction/blob/main/Cherry_Blossom_Prediction.pdf).
