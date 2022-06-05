@@ -1,9 +1,3 @@
----
-title: "R Notebook"
-output: html_notebook
----
-
-
 ![](https://badgen.net/badge/cherry-prediction/competition/pink) ![](https://badgen.net/badge/best-narrative/statistics/red) 
 
 # Cherry blossom peak bloom prediction
