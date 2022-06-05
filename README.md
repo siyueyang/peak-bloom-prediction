@@ -33,7 +33,7 @@ The competition provides cleaned data in the [Github repo](https://github.com/GM
 We extracted Vancouver bloom peak dates during 2004-2021 from the National Park Website. 
 Below shows the distribution of the peak bloom dates.
 
-![](Figures for report/bloom_peak_time.pdf)
+<embed src="hhttps://github.com/siyueyang/peak-bloom-prediction/blob/main/Figures%20for%20report/bloom_peak_time.pdf" width="500" height="375">
 
 
 We noticed that weather data is missing
