@@ -35,10 +35,32 @@ Below shows the distribution of the peak bloom dates.
 
 ![](img/bloom_peak_time.png)
 
-We construct another feature "peak bloom days" since January 1st of the year untial peak bloom for every record. 
+We construct another feature "peak bloom days" since January 1st of the year untial peak bloom for every record. Peak bloom days in Kyoto are more
+concentrated, while the days in other three locations are more spread out. Cherry blossom
+is earlier in Vancouver and Washington DC than Kyoto and Liestal; this may due to the
+differences in the locations and climate features.
 
 ![](img/peak_bloom_days.png)
 
-We noticed that weather data is missing
-across several years, thus using the Kalman Smoothing time series model to impute the
-daily temperature. 
+The cherry blossom is highly related to the temperature, as evidenced from a seasonal advance of the cherry blossom associated with a distinctive increase in the global temperature.  We extracted weather data from `rnoaa` package. As weather data is missing across several years, we used the Kalman Smoothing time series model to impute the daily temperature. 
+
+
+Here is the monthly average maximum and minimum temperature across four sies. Due to the different temperature trends, seperate models or hierarchical models should be considered for forecasting the bloom dates. We used separate models in our analysis. 
+
+![](img/seansonal_temp.png)
+
+
+Additionally, we summarised daily weather data into 
+
+- accumulated growing degree days (AGDD)
+- first growing days of year (FGDDY)
+- last growing days of year (LGDDY) 
+- accumulated freezing degree days (AFDD)
+- first freezing days of year (AFDDY)
+- last freezing days of year (LFDDY)
+- average maximum temperature in Winter (Tmax-W)
+- average maximum temperature in Spring (Tmax-S)
+- average minimum temperature in Winter (Tmin-W)
+- average minimum temperature in Spring (Tmin-S)
+- average precipitation in Winter (PRCPW)
+- average precipitation in Spring (PRCP-S)
